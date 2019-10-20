@@ -2890,6 +2890,8 @@ def main(custom_commandline=None):
                     esp.connect(args.before)
                 break
             except (FatalError, OSError) as err:
+                if(esp is not None):
+                    esp._port.close()
                 if args.port is not None:
                     raise
                 print("%s failed to connect: %s" % (each_port, err))
