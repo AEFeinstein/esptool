@@ -2907,8 +2907,17 @@ def main(custom_commandline=None):
 
         read_mac(esp, args)
 
-        if not args.no_stub:
-            esp = esp.run_stub()
+        try:
+            if not args.no_stub:
+                esp = esp.run_stub()
+        except:
+            esp._port.close()
+            try:  # Clean up AddrFilenamePairAction files
+                for address, argfile in args.addr_filename:
+                    argfile.close()
+            except AttributeError:
+                pass
+            return False
 
         if args.override_vddsdio:
             esp.override_vddsdio(args.override_vddsdio)
@@ -2938,6 +2947,9 @@ def main(custom_commandline=None):
 
         try:
             operation_func(esp, args)
+        except:
+            esp._port.close()
+            return False
         finally:
             try:  # Clean up AddrFilenamePairAction files
                 for address, argfile in args.addr_filename:
@@ -2965,6 +2977,8 @@ def main(custom_commandline=None):
 
     else:
         operation_func(args)
+
+    return True
 
 
 def expand_file_arguments():
