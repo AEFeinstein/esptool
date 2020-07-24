@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 Cesanta Software Limited
+ * Copyright (c) 2019 Espressif Systems (Shanghai) PTE LTD
  * All rights reserved
  *
  * This program is free software; you can redistribute it and/or modify it under
@@ -15,12 +15,9 @@
  * Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-/* Note: stub is deliberately loaded close to the very top
-   of available RAM, to reduce change of colliding with anything
-   else... */
 MEMORY {
-  iram : org = 0x4009F000, len = 0x1000
-  dram : org = 0x3ffec000, len = 0x14000
+  iram : org = 0x40028000, len = 0x18000
+  dram : org = 0x3FFD0000, len = 0x28000
 }
 
 ENTRY(stub_main)
@@ -32,9 +29,9 @@ SECTIONS {
   } > iram
 
   .bss : ALIGN(4) {
-     _bss_start = ABSOLUTE(.);
+    _bss_start = ABSOLUTE(.);
     *(.bss)
-	_bss_end = ABSOLUTE(.);
+    _bss_end = ABSOLUTE(.);
   } > dram
 
   .data : ALIGN(4) {
@@ -43,4 +40,4 @@ SECTIONS {
   } > dram
 }
 
-INCLUDE "rom_32.ld"
+INCLUDE "rom_32s2.ld"
