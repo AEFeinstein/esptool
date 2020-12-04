@@ -17,10 +17,15 @@
 from __future__ import division, print_function
 
 import argparse
+import json
+import sys
+
+from bitstring import BitString
+
 import esptool
+
 from . import base_fields
 from . import util
-from bitstring import BitString
 
 
 def add_common_commands(subparsers, efuses):
@@ -73,14 +78,14 @@ def add_common_commands(subparsers, efuses):
                                      choices=[e.name for e in efuses.efuses if e.write_disable_bit is not None])
 
     burn_block_data = subparsers.add_parser('burn_block_data', help="Burn non-key data to EFUSE blocks. "
-                                            "(Don't use this command to burn key data for Flash Encryption or Secure Boot, " +
+                                            "(Don't use this command to burn key data for Flash Encryption or ESP32 Secure Boot V1, "
                                             "as the byte order of keys is swapped (use burn_key)).")
     add_force_write_always(burn_block_data)
     burn_block_data.add_argument('--offset', '-o', help='Byte offset in the efuse block', type=int, default=0)
     burn_block_data.add_argument('block', help='Efuse block to burn.', action='append', choices=efuses.BURN_BLOCK_DATA_NAMES)
     burn_block_data.add_argument('datafile', help='File containing data to burn into the efuse block', action='append', type=argparse.FileType('rb'))
     for _ in range(0, len(efuses.BURN_BLOCK_DATA_NAMES)):
-        burn_block_data.add_argument('block',  help='Efuse block to burn.', metavar="BLOCK", nargs="?", action='append',
+        burn_block_data.add_argument('block', help='Efuse block to burn.', metavar="BLOCK", nargs="?", action='append',
                                      choices=efuses.BURN_BLOCK_DATA_NAMES)
         burn_block_data.add_argument('datafile', nargs="?", help='File containing data to burn into the efuse block',
                                      metavar="DATAFILE", action='append', type=argparse.FileType('rb'))
@@ -92,10 +97,85 @@ def add_common_commands(subparsers, efuses):
 
     subparsers.add_parser('adc_info', help='Display information about ADC calibration data stored in efuse.')
 
+    dump_cmd = subparsers.add_parser('dump', help='Dump raw hex values of all efuses')
+    dump_cmd.add_argument('--file_name', help='Saves dump for each block into separate file. Provide the common path name /path/blk.bin,'
+                          ' it will create: blk0.bin, blk1.bin ... blkN.bin. Use burn_block_data to write it back to another chip.')
+
+    summary_cmd = subparsers.add_parser('summary', help='Print human-readable summary of efuse values')
+    summary_cmd.add_argument('--format', help='Select the summary format', choices=['summary', 'json'], default='summary')
+    summary_cmd.add_argument('--file', help='File to save the efuse summary', type=argparse.FileType('w'), default=sys.stdout)
+
 
 def add_force_write_always(p):
-    p.add_argument('--force-write-always', help="Write the efuse even if it looks like it's already been written, or is write protected. " +
+    p.add_argument('--force-write-always', help="Write the efuse even if it looks like it's already been written, or is write protected. "
                    "Note that this option can't disable write protection, or clear any bit which has already been set.", action='store_true')
+
+
+def summary(esp, efuses, args):
+    """ Print a human-readable summary of efuse contents """
+    ROW_FORMAT = "%-40s %-50s%s = %s %s %s"
+    human_output = (args.format == 'summary')
+    json_efuse = {}
+    if args.file != sys.stdout:
+        print("Saving efuse values to " + args.file.name)
+    if human_output:
+        print(ROW_FORMAT.replace("-50", "-12") % ("EFUSE_NAME (Block)", "Description", "", "[Meaningful Value]", "[Readable/Writeable]", "(Hex Value)"),
+              file=args.file)
+        print("-" * 88, file=args.file)
+    for category in sorted(set(e.category for e in efuses), key=lambda c: c.title()):
+        if human_output:
+            print("%s fuses:" % category.title(), file=args.file)
+        for e in (e for e in efuses if e.category == category):
+            if e.efuse_type.startswith("bytes"):
+                raw = ""
+            else:
+                raw = "({})".format(e.get_bitstring())
+            (readable, writeable) = (e.is_readable(), e.is_writeable())
+            if readable and writeable:
+                perms = "R/W"
+            elif readable:
+                perms = "R/-"
+            elif writeable:
+                perms = "-/W"
+            else:
+                perms = "-/-"
+            base_value = e.get_meaning()
+            value = str(base_value)
+            if not readable:
+                value = value.replace("0", "?")
+            if human_output:
+                print(ROW_FORMAT % (e.get_info(), e.description[:50], "\n  " if len(value) > 20 else "", value, perms, raw), file=args.file)
+                desc_len = len(e.description[50:])
+                if desc_len:
+                    desc_len += 50
+                    for i in range(50, desc_len, 50):
+                        print("%-40s %-50s" % ("", e.description[i:(50 + i)]), file=args.file)
+            if args.format == 'json':
+                json_efuse[e.name] = {
+                    'name': e.name,
+                    'value': base_value if readable else value,
+                    'readable': readable,
+                    'writeable': writeable,
+                    'description': e.description,
+                    'category': e.category,
+                    'block': e.block,
+                    'word': e.word,
+                    'pos': e.pos,
+                    'efuse_type': e.efuse_type,
+                    'bit_len': e.bit_len}
+        if human_output:
+            print("", file=args.file)
+    if human_output:
+        print(efuses.summary(), file=args.file)
+        warnings = efuses.get_coding_scheme_warnings()
+        if warnings:
+            print("WARNING: Coding scheme has encoding bit error warnings (0x%x)" % warnings, file=args.file)
+        if args.file != sys.stdout:
+            args.file.close()
+            print("Done")
+    if args.format == 'json':
+        json.dump(json_efuse, args.file, sort_keys=True, indent=4)
+        print("")
 
 
 def dump(esp, efuses, args):
@@ -135,7 +215,7 @@ def burn_efuse(esp, efuses, args):
             print("  from BLOCK%d" % (block.id))
             for field in burn_list_a_block:
                 print("     - %s" % (field.name))
-                if efuses.blocks[field.block].get_coding_scheme() != efuses.CODING_SCHEME_NONE:
+                if efuses.blocks[field.block].get_coding_scheme() != efuses.REGS.CODING_SCHEME_NONE:
                     using_the_same_block_names = [e.name for e in efuses if e.block == field.block]
                     wr_names = [e.name for e in burn_list_a_block]
                     blocked_efuses_after_burn = [name for name in using_the_same_block_names if name not in wr_names]
@@ -174,7 +254,6 @@ def read_protect_efuse(esp, efuses, args):
         efuse = efuses[efuse_name]
         if not efuse.is_readable():
             print("Efuse %s is already read protected" % efuse.name)
-            return
         else:
             # make full list of which efuses will be disabled (ie share a read disable bit)
             all_disabling = [e for e in efuses if e.read_disable_bit == efuse.read_disable_bit]

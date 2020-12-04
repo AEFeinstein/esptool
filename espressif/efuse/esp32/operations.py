@@ -17,42 +17,45 @@
 from __future__ import division, print_function
 
 import argparse
-import esptool
+
 import espsecure
+
+import esptool
+
 from . import fields
 from .. import util
-from ..base_operations import (dump, burn_efuse, read_protect_efuse, write_protect_efuse,  # noqa: F401
-                               burn_block_data, burn_bit, add_common_commands, add_force_write_always)  # noqa: F401
+from ..base_operations import (add_common_commands, add_force_write_always, burn_bit, burn_block_data, burn_efuse, dump,  # noqa: F401
+                               read_protect_efuse, summary, write_protect_efuse)  # noqa: F401
 
 
 def add_commands(subparsers, efuses):
     add_common_commands(subparsers, efuses)
-    p = subparsers.add_parser('burn_key', help='Burn a 256-bit AES key to EFUSE: BLK1, BLK2 or BLK3 (flash_encryption, secure_boot).')
-    p.add_argument('--no-protect-key', help='Disable default read- and write-protecting of the key. ' +
+    p = subparsers.add_parser('burn_key', help='Burn a 256-bit key to EFUSE: %s' % ', '.join(efuses.BLOCKS_FOR_KEYS))
+    p.add_argument('--no-protect-key', help='Disable default read- and write-protecting of the key. '
                    'If this option is not set, once the key is flashed it cannot be read back or changed.', action='store_true')
     add_force_write_always(p)
-    p.add_argument('block', help='Key block to burn. "flash_encryption" is an alias for BLK1, "secure_boot" is an alias for BLK2.',
+    p.add_argument('block', help='Key block to burn. "flash_encryption" (block1), "secure_boot_v1" (block2), "secure_boot_v2" (block2)',
                    action='append', choices=efuses.BLOCKS_FOR_KEYS)
     p.add_argument('keyfile', help='File containing 256 bits of binary key data', action='append', type=argparse.FileType('rb'))
     for _ in efuses.BLOCKS_FOR_KEYS:
-        p.add_argument('block', help='Key block to burn. "flash_encryption" is an alias for BLK1, "secure_boot" is an alias for BLK2.', metavar="BLOCK",
-                       nargs="?", action='append', choices=efuses.BLOCKS_FOR_KEYS)
+        p.add_argument('block', help='Key block to burn. "flash_encryption" (block1), "secure_boot_v1" (block2), "secure_boot_v2" (block2)',
+                       metavar="BLOCK", nargs="?", action='append', choices=efuses.BLOCKS_FOR_KEYS)
         p.add_argument('keyfile', help='File containing 256 bits of binary key data', metavar="KEYFILE", nargs="?", action='append',
                        type=argparse.FileType('rb'))
 
     burn_key_digest = subparsers.add_parser('burn_key_digest', help='Parse a RSA public key and burn the digest to eFuse for use with Secure Boot V2')
     burn_key_digest.add_argument('keyfile', help='Key file to digest (PEM format)', type=argparse.FileType('rb'))
-    burn_key_digest.add_argument('--no-protect-key', help='Disable default write-protecting of the key digest. ' +
+    burn_key_digest.add_argument('--no-protect-key', help='Disable default write-protecting of the key digest. '
                                  'If this option is not set, once the key is flashed it cannot be changed.', action='store_true')
     add_force_write_always(burn_key_digest)
 
     p = subparsers.add_parser('set_flash_voltage',
-                              help='Permanently set the internal flash voltage regulator to either 1.8V, 3.3V or OFF. ' +
+                              help='Permanently set the internal flash voltage regulator to either 1.8V, 3.3V or OFF. '
                               'This means GPIO12 can be high or low at reset without changing the flash voltage.')
     p.add_argument('voltage', help='Voltage selection', choices=['1.8V', '3.3V', 'OFF'])
 
-    p = subparsers.add_parser('burn_custom_mac', help='Burn a 48-bit Custom MAC Address to EFUSE BLK3.')
-    p.add_argument('mac', help='Custom MAC Address to burn given in hexadecimal format with bytes separated by colons' +
+    p = subparsers.add_parser('burn_custom_mac', help='Burn a 48-bit Custom MAC Address to EFUSE BLOCK3.')
+    p.add_argument('mac', help='Custom MAC Address to burn given in hexadecimal format with bytes separated by colons'
                    ' (e.g. AB:CD:EF:01:02:03).', type=fields.base_fields.CheckArgValue(efuses, "CUSTOM_MAC"))
     add_force_write_always(p)
 
@@ -127,7 +130,7 @@ def adc_info(esp, efuses, args):
         print("ADC VRef calibration: %dmV" % adc_vref.get())
 
     if blk3_reserve.get():
-        print("ADC readings stored in efuse BLK3:")
+        print("ADC readings stored in efuse BLOCK3:")
         print("    ADC1 Low reading  (150mV): %d" % efuses["ADC1_TP_LOW"].get())
         print("    ADC1 High reading (850mV): %d" % efuses["ADC1_TP_HIGH"].get())
         print("    ADC2 Low reading  (150mV): %d" % efuses["ADC2_TP_LOW"].get())
@@ -148,23 +151,29 @@ def burn_key(esp, efuses, args):
     for block_name, datafile in zip(block_name_list, datafile_list):
         efuse = None
         for block in efuses.blocks:
-            if block_name == block.name or block_name == block.alias:
+            if block_name == block.name or block_name in block.alias:
                 efuse = efuses[block.name]
         if efuse is None:
             raise esptool.FatalError("Unknown block name - %s" % (block_name))
         num_bytes = efuse.bit_len // 8
         data = datafile.read()
-        data = data[::-1]
+        revers_msg = None
+        if block_name in ("flash_encryption", "secure_boot_v1"):
+            revers_msg = "\tReversing the byte order"
+            data = data[::-1]
         print(" - %s -> [%s]" % (efuse.name, util.hexify(data, " ")))
+        if revers_msg:
+            print(revers_msg)
         if len(data) != num_bytes:
             raise esptool.FatalError("Incorrect key file size %d. Key file must be %d bytes (%d bits) of raw binary key data." %
                                      (len(data), num_bytes, num_bytes * 8))
 
         efuse.save(data)
 
-        if not no_protect_key:
-            print("\tDisabling read to key block")
-            efuse.disable_read()
+        if block_name in ("flash_encryption", "secure_boot_v1"):
+            if not no_protect_key:
+                print("\tDisabling read to key block")
+                efuse.disable_read()
 
         if not no_protect_key:
             print("\tDisabling write to key block")
@@ -185,15 +194,15 @@ def burn_key(esp, efuses, args):
 
 
 def burn_key_digest(esp, efuses, args):
-    if efuses.coding_scheme == efuses.CODING_SCHEME_34:
-        raise RuntimeError("burn_key_digest only works with 'None' coding scheme")
+    if efuses.coding_scheme == efuses.REGS.CODING_SCHEME_34:
+        raise esptool.FatalError("burn_key_digest only works with 'None' coding scheme")
 
     chip_revision = esp.get_chip_description()
     if "revision 3" not in chip_revision:
         raise esptool.FatalError("Incorrect chip revision for Secure boot v2. Detected: %s. Expected: (revision 3)" % chip_revision)
 
     digest = espsecure._digest_rsa_public_key(args.keyfile)
-    efuse = efuses["BLK2"]
+    efuse = efuses["BLOCK2"]
     num_bytes = efuse.bit_len // 8
     if len(digest) != num_bytes:
         raise esptool.FatalError("Incorrect digest size %d. Digest must be %d bytes (%d bits) of raw binary key data." %

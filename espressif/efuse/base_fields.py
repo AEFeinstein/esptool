@@ -17,10 +17,14 @@
 from __future__ import division, print_function
 
 import argparse
-import sys
-import esptool
+import binascii
 import re
+import sys
+
 from bitstring import BitArray, BitString
+
+import esptool
+
 from . import util
 
 
@@ -111,15 +115,15 @@ class EfuseProtectBase(object):
 class EfuseBlockBase(EfuseProtectBase):
     def __init__(self, parent, param, skip_read=False):
         self.parent = parent
-        self.name = param[0]
-        self.alias = param[1]
-        self.id = param[2]
-        self.rd_addr = param[3]
-        self.wr_addr = param[4]
-        self.write_disable_bit = param[5]
-        self.read_disable_bit = param[6]
-        self.len = param[7]
-        self.key_purpose_name = param[8]
+        self.name = param.name
+        self.alias = param.alias
+        self.id = param.id
+        self.rd_addr = param.rd_addr
+        self.wr_addr = param.wr_addr
+        self.write_disable_bit = param.write_disable_bit
+        self.read_disable_bit = param.read_disable_bit
+        self.len = param.len
+        self.key_purpose_name = param.key_purpose
         bit_block_len = self.get_block_len() * 8
         self.bitarray = BitString(bit_block_len)
         self.bitarray.set(0)
@@ -130,18 +134,18 @@ class EfuseBlockBase(EfuseProtectBase):
 
     def get_block_len(self):
         coding_scheme = self.get_coding_scheme()
-        if coding_scheme == self.parent.CODING_SCHEME_NONE:
+        if coding_scheme == self.parent.REGS.CODING_SCHEME_NONE:
             return self.len * 4
-        elif coding_scheme == self.parent.CODING_SCHEME_34:
+        elif coding_scheme == self.parent.REGS.CODING_SCHEME_34:
             return (self.len * 3 // 4) * 4
-        elif coding_scheme == self.parent.CODING_SCHEME_RS:
+        elif coding_scheme == self.parent.REGS.CODING_SCHEME_RS:
             return self.len * 4
         else:
             raise esptool.FatalError("Coding scheme (%d) not supported" % (coding_scheme))
 
     def get_coding_scheme(self):
         if self.id == 0:
-            return self.parent.CODING_SCHEME_NONE
+            return self.parent.REGS.CODING_SCHEME_NONE
         else:
             return self.parent.coding_scheme
 
@@ -182,7 +186,7 @@ class EfuseBlockBase(EfuseProtectBase):
     def print_block(self, bit_string, comment, debug=False):
         if self.parent.debug or debug:
             bit_string.pos = 0
-            print("%-15s (%-16s) [%-2d] %s:" % (self.name, self.alias, self.id, comment),
+            print("%-15s (%-16s) [%-2d] %s:" % (self.name, " ".join(self.alias)[:16], self.id, comment),
                   " ".join(["%08x" % word for word in bit_string.readlist('%d*uint:32' % (bit_string.len / 32))[::-1]]))
 
     def check_wr_data(self):
@@ -214,13 +218,13 @@ class EfuseBlockBase(EfuseProtectBase):
                     wr_data.set(0)
                 else:
                     coding_scheme = self.get_coding_scheme()
-                    if coding_scheme == self.parent.CODING_SCHEME_NONE:
+                    if coding_scheme == self.parent.REGS.CODING_SCHEME_NONE:
                         print("\t(coding scheme = NONE)")
-                    elif coding_scheme == self.parent.CODING_SCHEME_RS:
+                    elif coding_scheme == self.parent.REGS.CODING_SCHEME_RS:
                         print("\t(coding scheme = RS)")
                         error_msg = "\tBurn into %s is forbidden (RS coding scheme does not allow this)." % (self.name)
                         self.parent.print_error_msg(error_msg)
-                    elif coding_scheme == self.parent.CODING_SCHEME_34:
+                    elif coding_scheme == self.parent.REGS.CODING_SCHEME_34:
                         print("\t(coding scheme = 3/4)")
                         data_can_not_be_burn = False
                         for i in range(0, self.get_bitstring().len, 6 * 8):
@@ -310,11 +314,6 @@ class EspEfusesBase(object):
     Wrapper object to manage the efuse fields in a connected ESP bootloader
     """
 
-    # Coding Scheme values
-    CODING_SCHEME_NONE  = 0
-    CODING_SCHEME_34    = 1
-    CODING_SCHEME_RS    = 2
-
     _esp    = None
     blocks  = []
     efuses  = []
@@ -326,6 +325,13 @@ class EspEfusesBase(object):
 
     def print_status_regs(self):
         pass
+
+    def get_crystal_freq(self):
+        return self._esp.get_crystal_freq()
+
+    def read_efuse(self, n):
+        """ Read the nth word of the ESP3x EFUSE region. """
+        return self._esp.read_efuse(n)
 
     def read_reg(self, addr):
         return self._esp.read_reg(addr)
@@ -341,7 +347,7 @@ class EspEfusesBase(object):
 
     def get_index_block_by_name(self, name):
         for block in self.blocks:
-            if block.name == name or block.alias == name:
+            if block.name == name or name in block.alias:
                 return block.id
         return None
 
@@ -400,19 +406,19 @@ class EspEfusesBase(object):
 
 
 class EfuseFieldBase(EfuseProtectBase):
-    def __init__(self, parent, name, category, block, word, pos, efuse_type, write_disable_bit, read_disable_bit, efuse_class, description, dict_value):
-        self.category = category
+    def __init__(self, parent, param):
+        self.category = param.category
         self.parent = parent
-        self.block = block
-        self.word = word
-        self.pos = pos
-        self.write_disable_bit = write_disable_bit
-        self.read_disable_bit = read_disable_bit
-        self.name = name
-        self.efuse_class = efuse_class
-        self.efuse_type = efuse_type
-        self.description = description
-        self.dict_value = dict_value
+        self.block = param.block
+        self.word = param.word
+        self.pos = param.pos
+        self.write_disable_bit = param.write_disable_bit
+        self.read_disable_bit = param.read_disable_bit
+        self.name = param.name
+        self.efuse_class = param.class_type
+        self.efuse_type = param.type
+        self.description = param.description
+        self.dict_value = param.dictionary
         if self.efuse_type.startswith("bool"):
             field_len = 1
         else:
@@ -433,12 +439,12 @@ class EfuseFieldBase(EfuseProtectBase):
                     # cmd line: 0x0102030405060708 .... 112233ff      (hex)
                     # regs: 112233ff ... 05060708 01020304
                     # BLK: ff 33 22 11 ... 08 07 06 05 04 03 02 01
-                    return new_value_str[2:].decode("hex")[::-1]
+                    return binascii.unhexlify(new_value_str[2:])[::-1]
                 else:
                     # cmd line: 0102030405060708 .... 112233ff        (string)
                     # regs: 04030201 08070605 ... ff332211
                     # BLK: 01 02 03 04 05 06 07 08 ... 11 22 33 ff
-                    return new_value_str.decode("hex")
+                    return binascii.unhexlify(new_value_str)
             else:
                 return new_value_str
 
